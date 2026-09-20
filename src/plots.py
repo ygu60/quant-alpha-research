@@ -22,6 +22,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.transforms as transforms
 import numpy as np
 import pandas as pd
 
@@ -63,6 +64,43 @@ def _end_label(ax, x, y, text, color):
                 va="center", ha="left", fontsize=9.5, color=color, fontweight="bold")
 
 
+def _end_labels_decluttered(ax, entries: list[tuple[float, float, str, str]], min_gap_frac: float = 0.05) -> None:
+    """Place end-of-line labels at a fixed x (just past the right edge, in
+    axes-fraction coordinates) with y positions decluttered in DATA
+    coordinates so labels for series whose lines end close together don't
+    overlap -- e.g. two strategies both ending near a 0% drawdown. Each
+    label keeps a thin leader line back to its series' true end point when
+    the label had to move.
+
+    `entries`: list of (x_end, y_end, text, color).
+    """
+    if not entries:
+        return
+    ylo, yhi = ax.get_ylim()
+    min_gap = (yhi - ylo) * min_gap_frac
+
+    ordered = sorted(range(len(entries)), key=lambda i: entries[i][1])
+    adjusted = [entries[i][1] for i in ordered]
+    for k in range(1, len(adjusted)):
+        if adjusted[k] - adjusted[k - 1] < min_gap:
+            adjusted[k] = adjusted[k - 1] + min_gap
+
+    trans = transforms.blended_transform_factory(ax.transAxes, ax.transData)
+    for k, i in enumerate(ordered):
+        x_end, y_end, text, color = entries[i]
+        y_label = adjusted[k]
+        ax.annotate(text, xy=(1.0, y_label), xycoords=trans, xytext=(6, 0),
+                    textcoords="offset points", va="center", ha="left",
+                    fontsize=9.5, color=color, fontweight="bold")
+        if abs(y_label - y_end) > min_gap * 0.2:
+            # Vertical stub at the line's own true x (never introduce a
+            # second, differently-typed x value here -- mixing a raw
+            # ax.get_xlim() float with a datetime x_end previously corrupted
+            # the whole axis's date scaling).
+            ax.plot([x_end, x_end], [y_end, y_label], color=color,
+                    linewidth=0.6, linestyle=":", alpha=0.6, zorder=4, clip_on=False)
+
+
 def plot_equity_curves(series_dict: dict[str, pd.Series], title: str, out_path: Path) -> None:
     """series_dict: label -> daily return Series (not yet cumulated). All
     series are reindexed to their common date range before cumulating so
@@ -72,15 +110,17 @@ def plot_equity_curves(series_dict: dict[str, pd.Series], title: str, out_path: 
     common = None
     for s in series_dict.values():
         common = s.index if common is None else common.intersection(s.index)
+    label_entries = []
     for label, returns in series_dict.items():
         color = _COLOR_MAP.get(label, INK_SECONDARY)
         equity = (1 + returns.loc[common]).cumprod()
         ax.plot(equity.index, equity.values, color=color, linewidth=1.8, zorder=3)
-        _end_label(ax, equity.index[-1], equity.values[-1], label, color)
+        label_entries.append((equity.index[-1], equity.values[-1], label, color))
     ax.axhline(1.0, color=BASELINE, linewidth=1.0, linestyle="--", zorder=1)
     ax.set_title(title, fontsize=12, fontweight="bold", loc="left")
     ax.set_ylabel("Growth of $1")
     _style_axes(ax)
+    _end_labels_decluttered(ax, label_entries)
     fig.tight_layout()
     fig.savefig(out_path, facecolor=SURFACE)
     plt.close(fig)
@@ -91,18 +131,20 @@ def plot_drawdown(series_dict: dict[str, pd.Series], title: str, out_path: Path)
     common = None
     for s in series_dict.values():
         common = s.index if common is None else common.intersection(s.index)
+    label_entries = []
     for label, returns in series_dict.items():
         color = _COLOR_MAP.get(label, INK_SECONDARY)
         equity = (1 + returns.loc[common]).cumprod()
         drawdown = equity / equity.cummax() - 1.0
         ax.fill_between(drawdown.index, drawdown.values, 0, color=color, alpha=0.18, zorder=2)
         ax.plot(drawdown.index, drawdown.values, color=color, linewidth=1.4, zorder=3)
-        _end_label(ax, drawdown.index[-1], drawdown.values[-1], label, color)
+        label_entries.append((drawdown.index[-1], drawdown.values[-1], label, color))
     ax.axhline(0.0, color=BASELINE, linewidth=1.0, zorder=1)
     ax.set_title(title, fontsize=12, fontweight="bold", loc="left")
     ax.set_ylabel("Drawdown from peak")
     ax.yaxis.set_major_formatter(lambda v, _: f"{v:.0%}")
     _style_axes(ax)
+    _end_labels_decluttered(ax, label_entries)
     fig.tight_layout()
     fig.savefig(out_path, facecolor=SURFACE)
     plt.close(fig)
@@ -113,6 +155,7 @@ def plot_rolling_sharpe(series_dict: dict[str, pd.Series], window: int, title: s
     common = None
     for s in series_dict.values():
         common = s.index if common is None else common.intersection(s.index)
+    label_entries = []
     for label, returns in series_dict.items():
         color = _COLOR_MAP.get(label, INK_SECONDARY)
         r = returns.loc[common]
@@ -120,11 +163,12 @@ def plot_rolling_sharpe(series_dict: dict[str, pd.Series], window: int, title: s
         ax.plot(rolling_sharpe.index, rolling_sharpe.values, color=color, linewidth=1.5, zorder=3)
         valid = rolling_sharpe.dropna()
         if len(valid):
-            _end_label(ax, valid.index[-1], valid.values[-1], label, color)
+            label_entries.append((valid.index[-1], valid.values[-1], label, color))
     ax.axhline(0.0, color=BASELINE, linewidth=1.0, zorder=1)
     ax.set_title(title, fontsize=12, fontweight="bold", loc="left")
     ax.set_ylabel(f"Rolling {window}-day annualized Sharpe")
     _style_axes(ax)
+    _end_labels_decluttered(ax, label_entries)
     fig.tight_layout()
     fig.savefig(out_path, facecolor=SURFACE)
     plt.close(fig)

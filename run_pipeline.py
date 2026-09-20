@@ -39,6 +39,7 @@ from sklearn.linear_model import Ridge
 from src import events, plots
 from src.backtest import run_backtest
 from src.data import load_research_universe, load_research_volume, simulate_universe
+from src.dl import TorchMLP
 from src.metrics import summarize
 from src.ml import run_ml_walk_forward
 from src.pairs import adaptive_pairs_weights
@@ -169,7 +170,7 @@ def main() -> None:
         print_stats("Benchmark: equal-weight buy & hold (universe)", bh_res["stats"])
         log_result("benchmark_buy_hold", bh_res["returns"], bh_res["stats"])
 
-        iwm_ret = bench["IWM"].pct_change().dropna()
+        iwm_ret = bench["IWM"].pct_change(fill_method=None).dropna()
         print_stats("Benchmark: IWM (Russell 2000 ETF) buy & hold", summarize(iwm_ret))
 
         # ---------------- Strategy 1: cross-sectional short-term reversal ----------------
@@ -202,7 +203,7 @@ def main() -> None:
         print_stats("1d. Walk-forward OOS, RISK-MANAGED (headline number)", wf_managed.combined_stats)
         log_result("reversal_walk_forward_risk_managed", wf_managed.combined_returns, wf_managed.combined_stats)
 
-        vol_bucket = volatility_regime(bench["SPY"].pct_change(), vol_window=20,
+        vol_bucket = volatility_regime(bench["SPY"].pct_change(fill_method=None), vol_window=20,
                                        percentile_window=REGIME_VOL_PERCENTILE_WINDOW).reindex(prices.index)
         not_low_vol_gate = (vol_bucket != "low").fillna(False)
         regime_weight_fn = partial(reversal_regime_gated, lookback=3, n_long=n_side, n_short=n_side,
@@ -299,7 +300,7 @@ def main() -> None:
         print_stats("4d. Risk-managed (same protocol as Strategy 1, not re-tuned)", ml_managed.combined_stats)
         log_result("ml_walk_forward_risk_managed", ml_managed.combined_returns, ml_managed.combined_stats)
 
-        spy_ret = bench["SPY"].pct_change().dropna()
+        spy_ret = bench["SPY"].pct_change(fill_method=None).dropna()
         common_spy = ml_managed.combined_returns.index.intersection(spy_ret.index)
         spy_oos_stats = summarize(spy_ret.loc[common_spy])
         print_stats("SPY buy & hold over the SAME out-of-sample dates", spy_oos_stats)
@@ -311,6 +312,48 @@ def main() -> None:
                      (ml_managed.combined_stats.get("max_drawdown", -1) > -0.10 and ml_managed.combined_stats.get("sharpe", -99) > 0.3)
         print(f"    Clears the 'significantly beats SPY, or very stable low-drawdown' bar? "
               f"{'YES' if clears_bar else 'NO -- not recommended for deployment.'}")
+
+        print("\n4e. Deep learning parametric search (small PyTorch MLP grid, not exhaustive)")
+        dl_configs = {
+            "mlp_small_light_dropout": dict(hidden_sizes=(16,), dropout=0.1),
+            "mlp_small_heavy_dropout": dict(hidden_sizes=(16,), dropout=0.4),
+            "mlp_deep_light_dropout": dict(hidden_sizes=(32, 16), dropout=0.1),
+            "mlp_deep_heavy_dropout": dict(hidden_sizes=(32, 16), dropout=0.4),
+        }
+        dl_results = {}
+        for name, cfg in dl_configs.items():
+            build_dl = lambda cfg=cfg: TorchMLP(max_epochs=60, patience=8, lr=1e-3, weight_decay=1e-4,
+                                                 random_state=42, **cfg)
+            res = run_ml_walk_forward(prices, volume, build_model=build_dl, horizon=10,
+                                       train_days=TRAIN_DAYS, test_days=TEST_DAYS, top_frac=0.20, cost_bps=COST_BPS)
+            dl_results[name] = res
+            print_stats(f"    {name}", res.combined_stats)
+
+        best_dl_name = max(dl_results, key=lambda k: dl_results[k].combined_stats.get("sharpe", -99))
+        dl_best = dl_results[best_dl_name]
+        print(f"\n    Best DL config: {best_dl_name} (Sharpe {dl_best.combined_stats['sharpe']:.3f})")
+
+        dl_null_sharpes = []
+        for seed in range(4):
+            build_dl_seed = lambda cfg=dl_configs[best_dl_name]: TorchMLP(
+                max_epochs=60, patience=8, lr=1e-3, weight_decay=1e-4, random_state=42, **cfg)
+            shuf = run_ml_walk_forward(prices, volume, build_model=build_dl_seed, horizon=10,
+                                        train_days=TRAIN_DAYS, test_days=TEST_DAYS, top_frac=0.20,
+                                        cost_bps=COST_BPS, shuffle_labels=True, random_state=seed)
+            dl_null_sharpes.append(shuf.combined_stats.get("sharpe", np.nan))
+        dl_null_sharpes = np.array(dl_null_sharpes)
+        dl_real_sharpe = dl_best.combined_stats["sharpe"]
+        dl_percentile = float((dl_null_sharpes < dl_real_sharpe).mean())
+        print(f"    Permutation test: real Sharpe {dl_real_sharpe:.3f} sits at the {dl_percentile:.0%} "
+              f"percentile of {len(dl_null_sharpes)} shuffled-label draws (mean {dl_null_sharpes.mean():.3f}).")
+
+        dl_managed = run_ml_walk_forward(prices, volume, build_model=lambda: TorchMLP(
+            max_epochs=60, patience=8, lr=1e-3, weight_decay=1e-4, random_state=42, **dl_configs[best_dl_name]),
+            horizon=10, train_days=TRAIN_DAYS, test_days=TEST_DAYS, top_frac=0.20, cost_bps=COST_BPS,
+            risk_overlay=ml_overlay)
+        print_stats("    Risk-managed (same protocol, not re-tuned)", dl_managed.combined_stats)
+        print(f"    Deep learning does {'NOT ' if dl_managed.combined_stats.get('sharpe', -99) <= ml_managed.combined_stats.get('sharpe', -99) else ''}"
+              f"improve on the tree-based ML result above.")
 
         # ---------------- Plots ----------------
         print("\nGenerating plots...")

@@ -53,7 +53,7 @@ def volatility_target(
     days of history exist, leverage defaults to 1.0 (no scaling) rather than
     an unstable early estimate.
     """
-    asset_returns = prices.pct_change()
+    asset_returns = prices.pct_change(fill_method=None)
     applied = weights.shift(1).fillna(0.0)
     base_returns = (applied * asset_returns).sum(axis=1)
 
@@ -125,7 +125,7 @@ def drawdown_kill_switch(
     to the weight decided AT day t, which only affects the t -> t+1 return
     -- no leakage.
     """
-    asset_returns = prices.pct_change()
+    asset_returns = prices.pct_change(fill_method=None)
     out = weights.copy()
     columns = weights.columns
     n = len(weights)

@@ -37,7 +37,7 @@ def run_backtest(
         weights = weights.div(safe_sums, axis=0)
         weights = weights.mask(row_sums == 0, 0.0)
 
-    asset_returns = prices.pct_change()
+    asset_returns = prices.pct_change(fill_method=None)
     applied_weights = weights.shift(1).fillna(0.0)  # decided at t, applied to t->t+1 return
 
     gross_returns = (applied_weights * asset_returns).sum(axis=1)

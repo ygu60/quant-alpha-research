@@ -16,12 +16,27 @@ def sharpe_ratio(returns: pd.Series, rf: float = 0.0, periods_per_year: int = TR
 
 
 def sortino_ratio(returns: pd.Series, rf: float = 0.0, periods_per_year: int = TRADING_DAYS) -> float:
+    """Sortino & van der Meer's (1991) downside deviation is a target
+    semi-deviation over the FULL sample -- upside days contribute a zero,
+    they are not excluded from the count:
+
+        DD = sqrt( (1/N) * sum_t min(r_t - MAR, 0)^2 )
+
+    An earlier version of this function computed std(ddof=1) over only the
+    negative-excess-return subset, i.e. divided by (n_negative_days - 1)
+    instead of N. That's a different, non-standard statistic, and it
+    systematically UNDERSTATES downside deviation (inflating the reported
+    Sortino ratio) whenever the return series has more up-days than
+    down-days, which is the typical case for a positive-drift book. Caught
+    by cross-checking against `empyrical.sortino_ratio` on the same series,
+    which disagreed by no small margin.
+    """
     excess = returns - rf / periods_per_year
-    downside = excess[excess < 0]
-    dd_std = downside.std(ddof=1)
-    if dd_std == 0 or np.isnan(dd_std):
+    downside_sq = np.minimum(excess, 0.0) ** 2
+    dd = np.sqrt(downside_sq.mean())
+    if dd == 0 or np.isnan(dd):
         return 0.0
-    return float(excess.mean() / dd_std * np.sqrt(periods_per_year))
+    return float(excess.mean() / dd * np.sqrt(periods_per_year))
 
 
 def max_drawdown(equity_curve: pd.Series) -> float:

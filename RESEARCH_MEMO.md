@@ -1,6 +1,7 @@
 # Quant Research Pipeline — Memo
 
-Author: Jimmy · Pipeline built: 2026-09-19 · Real-data rebuild: 2026-09-19/20
+Author: Jimmy · Pipeline built: 2026-09-19 · Real-data rebuild: 2026-09-19/20 ·
+Regime-conditioning + ML/deep-learning follow-up: 2026-09-20
 
 ## 1. Goal
 
@@ -217,6 +218,67 @@ weights capital preservation more than an investor who's indifferent to a
 -57% drawdown, but it is not "free" incremental alpha on top of an existing
 equity allocation.
 
+### 7.1b Regime-conditioning: is the reversal edge concentrated in specific market conditions?
+
+Requested follow-up, motivated by a real possibility the always-on backtest
+above can't distinguish: a signal might have a genuine edge that's
+*conditional* on the market environment (e.g. mean-reversion earning its
+liquidity-provision premium mainly during volatile, dislocated markets)
+rather than uniformly present across all of history. `src/regime.py`
+implements two independent regime detectors: simple rolling rules (trend
+vs. a 200-day MA, and realized-vol percentile bucketed low/mid/high) and a
+proper latent-state model (Hamilton, 1989, Markov-switching mean/variance,
+via `statsmodels`) — see the module docstring for why keeping the latter
+walk-forward-safe (parameters estimated on train only, then a fixed-
+parameter Hamilton filter run forward through test) needed care.
+
+Three regime-gate rules were pre-specified against the risk-managed
+reversal strategy from §7.1, each restricting exposure to a subset of days
+based on SPY's own regime (an external, broad-market proxy, not derived
+from the traded universe itself):
+
+| Gate | Active | Sharpe | PSR | Max drawdown |
+|---|---|---|---|---|
+| None (§7.1 baseline) | 100% | 0.23 | 0.76 | -25.5% |
+| High-vol tertile only, 504d percentile window | 30% | 0.32 | 0.83 | -13.1% |
+| High-vol tertile only, 252d percentile window | 34% | **-0.06** | 0.43 | -19.5% |
+| Exclude low-vol tertile, 504d percentile window | 71% | 0.42 | 0.90 | -17.5% |
+| Exclude low-vol tertile, 252d percentile window | 63% | **0.44** | **0.91** | -16.8% |
+| Markov-switching high-vol probability > 0.5 | 43% | 0.13 | 0.65 | -20.3% |
+| SPY below 200-day MA (downtrend) only | 19% | 0.09 | 0.61 | -9.7% |
+| High-vol AND downtrend (combined) | 13% | 0.17 | 0.69 | -9.7% |
+
+Reading this table is the point, not just the numbers in isolation: the
+**"high-vol tertile only"** rule looked like a strong win at one lookback
+window (504 days) and then **flipped sign entirely** at a different,
+equally defensible lookback window (252 days) — Sharpe +0.32 to -0.06. That
+is a textbook sign of a rule that happened to fit one specific
+parameterization rather than a robust regime effect, and it is **rejected**
+on exactly that basis, not used anywhere in this project. The **"exclude
+only the low-vol tertile"** rule, by contrast, gives a consistent,
+positive improvement at BOTH lookback windows (Sharpe 0.42 and 0.44) — the
+kind of cross-parameterization agreement that makes a result worth trusting
+more than a single good-looking number does. The independent Markov-
+switching measure gives a weaker, but directionally consistent (positive,
+better than the downtrend-only rules), result — it agrees with the
+rule-based gates only 65% of the time, which is itself informative: regime
+detection is a fuzzier measurement than a single number suggests, and this
+project doesn't have three independently-confirming methods agreeing
+tightly, just two methods pointing the same general direction.
+
+The "downtrend only" and "high-vol AND downtrend" rules underperform the
+plain volatility gates — reversal here does not need a falling market to
+work, just not an unusually calm one. That is a small but real update to
+the theory in `docs/short_term_reversal.md`: the liquidity-provision
+mechanism (compensation for absorbing order flow during stress) looks more
+about volatility than about market direction specifically.
+
+**Updated recommendation**: short-term reversal + risk overlay +
+volatility-regime gate (exclude the low-vol tertile, 252-day lookback) —
+Sharpe **0.44**, PSR **0.91**, max drawdown **-16.8%**, active 63% of
+out-of-sample days. This supersedes the ungated §7.1 result as this
+project's headline strategy; see §7.4.
+
 ### 7.2 Strategy 2 — Pairs trading (regional banks)
 
 Formation-based pair selection (`src/pairs.py`) picks the 2 closest pairs
@@ -254,21 +316,31 @@ sample size. **Not recommended for deployment as currently specified.**
 
 ### 7.4 Recommendation
 
-Of the three, **only short-term reversal + risk overlay** shows a positive,
-cost-adjusted, out-of-sample Sharpe that also survives a genuine attempt to
-improve on it via parameter search. That is the strategy this pipeline
-recommends carrying forward — with the explicit caveat that PSR 0.76 is
-*moderate*, not overwhelming, confidence, and that it earns its case on
-absolute risk-adjusted return and drawdown containment, not as a
-diversifier.
+Of the three literature-based strategies, **only short-term reversal +
+risk overlay** shows a positive, cost-adjusted, out-of-sample Sharpe that
+also survives a genuine attempt to improve on it via parameter search.
+Layering the volatility-regime gate from §7.1b on top (a separately
+pre-specified, robustness-checked addition, not a parameter fit to this
+same backtest) raises that further. Neither the ML signal search (§10) nor
+deep learning (§10.4) found anything that clears their own, harder bar
+(significantly beat SPY, or low/stable drawdown) — both are documented as
+negative results, not carried forward.
 
-**Headline number, if one number is wanted: out-of-sample Sharpe ratio
-0.23** (annualized return 2.0%, max drawdown -25.5%, PSR 0.76), for
-short-term cross-sectional reversal (3-day lookback, quintile long book)
-with a 10%-annualized-vol target, 25% single-name cap, and a 30% circuit-
-breaker drawdown kill switch, net of 10bps one-way transaction costs, over
-23 real names across 5 sectors, walk-forward out-of-sample from mid-2017
-through mid-2026.
+**Headline number: out-of-sample Sharpe ratio 0.44** (annualized return
+3.6%, max drawdown -16.8%, PSR 0.91), for short-term cross-sectional
+reversal (3-day lookback, quintile long book) with a 10%-annualized-vol
+target, 25% single-name cap, a 30% circuit-breaker drawdown kill switch,
+AND a regime gate that sits out the lowest volatility tertile of SPY's own
+trailing 252-day realized-vol history (active 63% of days), net of 10bps
+one-way transaction costs, over 23 real names across 5 sectors,
+walk-forward out-of-sample from mid-2017 through mid-2026.
+
+This is still a **moderate**, not overwhelming, result — PSR 0.91 is good
+but not the 0.95+ that would make this an easy call, and §7.1's
+diversification finding (0.70 correlation with simply holding the
+universe) still applies to the gated version, which only changes WHEN the
+same underlying book is held, not what it holds. Treat this as the best
+candidate found, worth paper-testing next (§11), not as a proven edge.
 
 ## 8. Research process: two bugs found and fixed by backtesting on real data
 
@@ -450,14 +522,73 @@ the model latched onto, but not meaningful given the permutation test
 result above — a feature-importance ranking from a model that doesn't beat
 its own noise floor is not evidence those features matter.
 
-### 10.3 Conclusion
+### 10.3 Library survey
 
-**No ML configuration tested here is recommended for deployment.** The
-non-semantic feature set searched did not turn up a signal that survives a
-permutation test or that improves on simply holding SPY, on either
-Sharpe or drawdown. This is a negative result worth keeping in the
-project rather than discarding: it rules out the specific 15-feature,
-3-model, 2-horizon search space tried here, and the purged walk-forward +
+Requested follow-up: rather than hand-roll everything, survey what
+established quant/ML libraries this environment can actually run (Python
+3.14 is new enough that several standard packages don't have prebuilt
+wheels yet). `torch` (deep learning, §10.4), `ta` (technical indicators),
+`alphalens-reloaded` (factor/IC analysis; pulls in `empyrical-reloaded`),
+`arch` (GARCH), and `statsmodels` (incl. Markov-switching regression, used
+in §7.1b) all installed and work. `pandas-ta` explicitly refuses to install
+on Python 3.14 (`RuntimeError: Cannot install on Python version 3.14.0`);
+the original (unmaintained) `empyrical` fails for an unrelated reason
+(uses a `configparser.SafeConfigParser` API removed in Python 3.12) --
+`empyrical-reloaded` is the maintained fork and is what's actually used.
+`hmmlearn` and `ruptures` (both natural choices for regime detection) have
+no prebuilt wheel for this Python version and need a C++ compiler this
+machine doesn't have; `statsmodels`' Markov-switching models covered the
+same need (§7.1b) without one.
+
+The one library integration that materially changed a result: cross-
+checking `metrics.py` against `empyrical` surfaced a real bug in
+`sortino_ratio` (wrong denominator, inflating every previously-reported
+Sortino number in this memo -- see the `src/metrics.py` git history for the
+full explanation). Sharpe and max-drawdown matched `empyrical` to
+floating-point precision on the same check; only Sortino was wrong. This
+is exactly the value of cross-validating against an established library
+instead of trusting a hand-derived formula in isolation.
+
+### 10.4 Deep learning
+
+Requested follow-up: does more model capacity find something the tree-
+based models in §10.1-10.2 didn't? A small PyTorch MLP
+(`src/dl.py::TorchMLP`, an sklearn-compatible wrapper that plugs directly
+into the same `run_ml_walk_forward` purged validation loop from §10.1 --
+no separate code path for "the deep learning one") was run against a
+small, pre-registered 2x2 grid (hidden-layer size x dropout strength, not
+searched for a better-looking result) on the same 15-feature set and
+10-day horizon as the best tree-based result:
+
+| Config | Sharpe | PSR |
+|---|---|---|
+| 1 hidden layer (16 units), dropout 0.1 | 0.07 | 0.58 |
+| 1 hidden layer (16 units), dropout 0.4 | 0.10 | 0.62 |
+| 2 hidden layers (32, 16), dropout 0.1 | -0.13 | 0.34 |
+| 2 hidden layers (32, 16), dropout 0.4 | **0.15** | 0.68 |
+
+The best config's raw Sharpe (0.15) is comparable to or weaker than the
+tree-based models in §10.2 (RandomForest at the same horizon: 0.35), and a
+permutation test (4 shuffled-label draws) puts it at only the
+**75th percentile** of its own noise floor -- weaker evidence than the
+tree-based result's already-unconvincing 80th percentile. Applying the
+identical risk overlay from §7.1 makes it materially worse, not better:
+Sharpe **-0.18**, max drawdown **-50.8%** (vs. SPY's 0.85 / -33.7% over the
+same dates) -- the worst risk-managed result of any strategy tried in this
+project. More model capacity did not find a real signal a simpler model
+missed; if anything, the extra capacity found more ways to overfit a noisy,
+modest-sized training set.
+
+### 10.5 Conclusion
+
+**No ML or deep-learning configuration tested here is recommended for
+deployment.** The non-semantic feature set searched did not turn up a
+signal that survives a permutation test or that improves on simply holding
+SPY, on either Sharpe or drawdown, whether the model is a linear baseline,
+two tree ensembles, or a small neural network. This is a negative result
+worth keeping in the project rather than discarding: it rules out the
+specific 15-feature, 4-model (Ridge, RandomForest, HistGradientBoosting,
+MLP), 2-horizon search space tried here, and the purged walk-forward +
 permutation-test scaffolding in `src/ml.py` is reusable for testing any
 future ML signal on this project without repeating the design work.
 
@@ -469,8 +600,11 @@ studies that typically use hundreds to thousands of names); daily OHLCV is
 a low-information-density data source relative to what's actually used in
 production financial ML (order-book/microstructure data, alternative data,
 higher-frequency bars); and 9 years of history is a modest sample for a
-model with as much capacity as gradient boosting or a 150-tree forest to
-generalize from without capturing regime-specific noise.
+model with as much capacity as gradient boosting, a 150-tree forest, or a
+multi-layer network to generalize from without capturing regime-specific
+noise. More capacity (§10.4) made this worse, not better, which is itself
+evidence the bottleneck is the SIGNAL available in this feature set, not
+the model's ability to extract it.
 
 ## 11. Robinhood MCP — status and what it means for this pipeline
 
@@ -484,13 +618,16 @@ Agentic account. Not yet connected in this session.
 
 **Recommended sequence from here**, given §7 and §10's results:
 
-1. Do not deploy pairs trading, turn-of-month, or any of the ML
-   configurations as currently specified — none cleared even a modest
-   statistical confidence bar (§7.2, §7.3, §10.3).
-2. If proceeding with short-term reversal + risk overlay: connect the
-   Robinhood MCP, open the Agentic account with a small, explicit budget
-   sized to survive a repeat of the -25.5% OOS max drawdown without forcing
-   a liquidation.
+1. Do not deploy pairs trading, turn-of-month, or any of the ML/deep-
+   learning configurations as currently specified — none cleared even a
+   modest statistical confidence bar (§7.2, §7.3, §10.5).
+2. If proceeding with short-term reversal + risk overlay + regime gate
+   (§7.1b, the current headline): connect the Robinhood MCP, open the
+   Agentic account with a small, explicit budget sized to survive a repeat
+   of the -16.8% OOS max drawdown without forcing a liquidation, and wire
+   in the volatility-regime gate (`src/regime.py::volatility_regime`) as a
+   live daily check on SPY, not just a backtest annotation — the strategy
+   is meant to be flat roughly 37% of the time.
 3. Paper-test (or trade at minimum size with manual approval) for at least
    one full quarter (matching this project's `TEST_DAYS=63` walk-forward
    window) before scaling up, and explicitly compare realized fills/slippage
@@ -501,9 +638,11 @@ Agentic account. Not yet connected in this session.
    and the drawdown kill switch all need to be real trading rules the agent
    checks before every order, not retrospective backtest annotations.
 5. Keep re-running the walk-forward validation as new data arrives (a
-   rolling monitor, not a one-time check) — PSR 0.76 means this could
-   plausibly turn out to be noise in the next few quarters, and the
-   pipeline should be watched for that rather than assumed durable.
+   rolling monitor, not a one-time check) — PSR 0.91 is good but not
+   overwhelming, and this could plausibly turn out to be noise in the next
+   few quarters; the pipeline should be watched for that rather than
+   assumed durable. Pay particular attention to whether the regime gate's
+   improvement holds up out of the two lookback windows tested here.
 
 ## 12. Open questions
 
@@ -516,3 +655,13 @@ Agentic account. Not yet connected in this session.
   fetch time and the added survivorship-bias surface area of more tickers.
 - Whether margin access is actually part of the plan (relevant only if
   pairs trading is revisited after further work — not recommended as-is).
+- The volatility-regime gate (§7.1b) was checked at two lookback windows
+  and against one independent (Markov-switching) method — a genuinely
+  robust result would ideally survive more than two arbitrary choices;
+  worth revisiting with a third, differently-constructed lookback window
+  before treating the 0.44 Sharpe headline as settled.
+- Whether a larger, more diverse ML feature set (order-flow/microstructure
+  proxies, cross-asset features, alternative data) or a larger universe
+  would change §10's negative result — this project's search space (15
+  price/volume features, 23 names, daily bars) was deliberately modest and
+  explicitly does not rule out ML signals built from richer inputs.

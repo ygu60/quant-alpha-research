@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from src.backtest import run_backtest
-from src.metrics import sharpe_ratio
+from src.metrics import sharpe_ratio, sortino_ratio
 
 
 def test_no_lookahead():
@@ -46,6 +46,24 @@ def test_sharpe_matches_manual_calculation():
     print("PASS: test_sharpe_matches_manual_calculation")
 
 
+def test_sortino_matches_empyrical():
+    """Sortino & van der Meer's downside deviation is a target semi-
+    deviation over the FULL sample (upside days contribute a zero, they are
+    not excluded from the count) -- cross-checked against the standard
+    `empyrical` library rather than just a hand-rolled formula, since an
+    earlier version of this function used a non-standard definition
+    (std over only the negative-return subset) that silently inflated the
+    reported ratio. See src/metrics.py::sortino_ratio docstring.
+    """
+    import empyrical as ep
+    rng = np.random.default_rng(1)
+    rets = pd.Series(rng.normal(0.0006, 0.012, 800))
+    ours = sortino_ratio(rets)
+    theirs = ep.sortino_ratio(rets, required_return=0, annualization=252)
+    assert abs(ours - theirs) < 1e-9, f"{ours} vs empyrical's {theirs}"
+    print("PASS: test_sortino_matches_empyrical")
+
+
 def test_costs_reduce_returns():
     dates = pd.bdate_range("2024-01-01", periods=10)
     rng = np.random.default_rng(1)
@@ -76,6 +94,7 @@ def test_long_only_clips_negative_weights():
 if __name__ == "__main__":
     test_no_lookahead()
     test_sharpe_matches_manual_calculation()
+    test_sortino_matches_empyrical()
     test_costs_reduce_returns()
     test_long_only_clips_negative_weights()
     print("\nAll sanity checks passed.")

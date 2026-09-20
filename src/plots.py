@@ -35,6 +35,7 @@ BASELINE = "#c3c2b7"
 COLOR_REVERSAL = "#2a78d6"   # categorical slot 1, blue
 COLOR_SPY = "#eb6834"        # slot 2, orange
 COLOR_UNIVERSE_BH = "#1baf7a"  # slot 3, aqua
+COLOR_REGIME = "#eda100"    # slot 4, yellow -- direct end-label required (low light-surface contrast)
 COLOR_ML = "#4a3aa7"         # slot 7, violet
 COLOR_POSITIVE = "#2a78d6"   # diverging pole (blue)
 COLOR_NEGATIVE = "#e34948"   # diverging pole (red)
@@ -182,6 +183,7 @@ def plot_permutation_test(null_sharpes: np.ndarray, real_sharpe: float, title: s
 
 _COLOR_MAP = {
     "Reversal + risk overlay": COLOR_REVERSAL,
+    "Reversal + risk overlay + regime gate": COLOR_REGIME,
     "SPY buy & hold": COLOR_SPY,
     "Universe buy & hold": COLOR_UNIVERSE_BH,
     "ML strategy (risk-managed)": COLOR_ML,

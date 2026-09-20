@@ -42,6 +42,7 @@ from src.data import load_research_universe, load_research_volume, simulate_univ
 from src.metrics import summarize
 from src.ml import run_ml_walk_forward
 from src.pairs import adaptive_pairs_weights
+from src.regime import volatility_regime
 from src.risk import apply_full_overlay
 from src.strategies import short_term_reversal, turn_of_month
 from src.walk_forward import walk_forward, walk_forward_with_selection
@@ -108,6 +109,26 @@ def reversal_risk_managed(window_prices: pd.DataFrame, lookback: int, n_long: in
     raw = short_term_reversal(window_prices, lookback=lookback, n_long=n_long, n_short=n_short)
     long_only = to_long_only_weights(raw)
     return apply_full_overlay(window_prices, long_only, cost_bps=COST_BPS, **RISK_CFG)
+
+
+# Regime gate: exclude the LOWEST volatility tertile (of SPY's own trailing
+# realized vol), not just gate IN a "high" tertile. Pre-registered as two
+# candidate rules and tested with two different percentile lookback windows
+# each -- "high tertile only" flipped from Sharpe +0.32 to -0.06 just from
+# changing the lookback window (252 vs 504 days), so it does not survive a
+# robustness check and is NOT used. "Exclude the low tertile" gave a
+# consistent, positive result across BOTH lookback windows (Sharpe 0.42 and
+# 0.44) -- see RESEARCH_MEMO.md for the full comparison table. 252 days is
+# used here since it matches this project's existing "one trading year"
+# convention (TRAIN_DAYS) rather than being picked for a better-looking number.
+REGIME_VOL_PERCENTILE_WINDOW = 252
+
+
+def reversal_regime_gated(window_prices: pd.DataFrame, lookback: int, n_long: int, n_short: int,
+                           regime_gate: pd.Series) -> pd.DataFrame:
+    managed = reversal_risk_managed(window_prices, lookback, n_long, n_short)
+    gate = regime_gate.reindex(window_prices.index).fillna(False)
+    return managed.mul(gate, axis=0)
 
 
 def run_engine_check() -> None:
@@ -180,6 +201,19 @@ def main() -> None:
                                    cost_bps=COST_BPS, long_only=False)
         print_stats("1d. Walk-forward OOS, RISK-MANAGED (headline number)", wf_managed.combined_stats)
         log_result("reversal_walk_forward_risk_managed", wf_managed.combined_returns, wf_managed.combined_stats)
+
+        vol_bucket = volatility_regime(bench["SPY"].pct_change(), vol_window=20,
+                                       percentile_window=REGIME_VOL_PERCENTILE_WINDOW).reindex(prices.index)
+        not_low_vol_gate = (vol_bucket != "low").fillna(False)
+        regime_weight_fn = partial(reversal_regime_gated, lookback=3, n_long=n_side, n_short=n_side,
+                                    regime_gate=not_low_vol_gate)
+        wf_regime = walk_forward(prices, weight_fn=regime_weight_fn, train_days=TRAIN_DAYS, test_days=TEST_DAYS,
+                                  cost_bps=COST_BPS, long_only=False)
+        print_stats("1e. Walk-forward OOS, RISK-MANAGED + regime-gated (excludes low-vol tertile)",
+                    wf_regime.combined_stats)
+        frac_on = not_low_vol_gate.reindex(wf_regime.combined_returns.index).mean()
+        print(f"    Active (gate on) {frac_on:.0%} of out-of-sample days.")
+        log_result("reversal_walk_forward_regime_gated", wf_regime.combined_returns, wf_regime.combined_stats)
 
         # Diversification check: does blending with buy & hold help?
         common = wf_managed.combined_returns.index.intersection(bh_res["returns"].index)
@@ -284,6 +318,7 @@ def main() -> None:
         universe_bh_ret = bh_res["returns"]
         series_for_charts = {
             "Reversal + risk overlay": wf_managed.combined_returns,
+            "Reversal + risk overlay + regime gate": wf_regime.combined_returns,
             "ML strategy (risk-managed)": ml_managed.combined_returns,
             "SPY buy & hold": spy_ret,
             "Universe buy & hold": universe_bh_ret,
@@ -295,6 +330,8 @@ def main() -> None:
                                    plots.PLOTS_DIR / "rolling_sharpe.png")
         plots.plot_window_sharpe_bars(wf_managed.window_stats, "Reversal + risk overlay: Sharpe per walk-forward window",
                                        plots.PLOTS_DIR / "reversal_window_sharpe.png")
+        plots.plot_window_sharpe_bars(wf_regime.window_stats, "Reversal + risk overlay + regime gate: Sharpe per window",
+                                       plots.PLOTS_DIR / "regime_window_sharpe.png")
         plots.plot_window_sharpe_bars(ml_managed.window_stats, "ML strategy: Sharpe per walk-forward window",
                                        plots.PLOTS_DIR / "ml_window_sharpe.png")
         if not ml_h10.feature_importances.empty:
@@ -310,20 +347,26 @@ def main() -> None:
         print("\n" + "=" * 70)
         print("RECOMMENDATION")
         print("=" * 70)
-        headline = wf_managed.combined_stats
-        print(f"Only strategy with a positive, cost-adjusted, out-of-sample Sharpe that")
-        print(f"survives its own parameter-sensitivity check: short-term reversal + risk overlay.")
-        print(f"  Headline OOS Sharpe ratio:  {headline['sharpe']:.3f}")
-        print(f"  Probabilistic Sharpe Ratio: {headline['psr']:.3f}  (confidence true Sharpe > 0)")
-        print(f"  OOS max drawdown:           {headline['max_drawdown']:.1%}")
+        headline = wf_regime.combined_stats
+        baseline_headline = wf_managed.combined_stats
+        print(f"Best strategy found: short-term reversal + risk overlay + volatility-regime gate")
+        print(f"(exclude the lowest realized-vol tertile of SPY's own trailing history).")
+        print(f"  Headline OOS Sharpe ratio:  {headline['sharpe']:.3f}  (vs. {baseline_headline['sharpe']:.3f} ungated)")
+        print(f"  Probabilistic Sharpe Ratio: {headline['psr']:.3f}  (vs. {baseline_headline['psr']:.3f} ungated)")
+        print(f"  OOS max drawdown:           {headline['max_drawdown']:.1%}  (vs. {baseline_headline['max_drawdown']:.1%} ungated)")
         print(f"  OOS annualized return:      {headline['annualized_return']:.1%}")
+        print(f"Regime gate robustness: this specific rule (exclude ONLY the low-vol tertile,")
+        print(f"not 'require high vol') gave consistent improvement across two different")
+        print(f"percentile lookback windows (252 and 504 days); a narrower 'high-vol-only' gate")
+        print(f"FLIPPED SIGN between those same two windows and was rejected as non-robust --")
+        print(f"see RESEARCH_MEMO.md for the full comparison.")
         print(f"Pairs trading, turn-of-month, and the ML signal search showed no credible OOS")
         print(f"edge on this universe/period and should NOT be traded as currently specified.")
         print(f"See RESEARCH_MEMO.md for the full reasoning, including two risk-overlay bugs")
         print(f"found and fixed during this research and why they mattered.")
         events.log(
             "status", "pipeline recommendation",
-            recommended_strategy="short_term_reversal_risk_managed",
+            recommended_strategy="short_term_reversal_risk_managed_regime_gated",
             headline_sharpe=headline["sharpe"], headline_psr=headline["psr"],
             headline_max_drawdown=headline["max_drawdown"],
         )

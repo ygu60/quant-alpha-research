@@ -90,49 +90,66 @@ def drawdown_kill_switch(
     max_drawdown: float = 0.15,
     recovery_drawdown: float = 0.05,
 ) -> pd.DataFrame:
-    """Flatten the book once trailing drawdown breaches `max_drawdown`, stay
-    flat until drawdown recovers to within `recovery_drawdown` of the peak.
+    """Flatten the book once the underlying signal's drawdown breaches
+    `max_drawdown`, stay flat until it recovers to within `recovery_drawdown`
+    of its peak.
 
-    Implemented as a day-by-day simulation that reproduces backtest.py's
-    exact return/cost formula (applied_weights = weights.shift(1); cost =
-    turnover(applied_weights) * cost_bps) so that running the weights this
-    function returns back through `run_backtest` with the same `cost_bps`
-    reproduces the same equity curve the halt decisions were based on --
-    the halt at day t is decided using only the return realized through day
-    t's close (from the weight decided at t-1), then applied to the weight
-    decided AT day t, which only affects the t -> t+1 return. No leakage.
+    The drawdown gauge here is deliberately computed from the ORIGINAL,
+    never-halted `weights` applied throughout -- i.e. "what would this
+    strategy's own equity curve be doing right now if we always stayed
+    invested" -- rather than from the halt-adjusted output this function
+    produces. Two failure modes were found (via backtest, not by
+    inspection) from more "obvious" designs and are why this one is used:
+
+    1. Gauging recovery from the ACTUAL (halt-adjusted) equity curve: once
+       flattened, that curve returns exactly 0% forever, so its own
+       drawdown from its own peak can never shrink -- it permanently locks
+       the strategy flat after the very first breach. Caught by backtesting
+       real data, where a trigger in year 3 of a 9-year sample was never
+       followed by a single re-entry.
+    2. Gauging the TRIGGER from the actual curve while gauging RECOVERY from
+       the shadow curve: after re-entering, the actual curve is still deep
+       below its own PRE-CRASH peak (it only just started recovering), so
+       it immediately re-breaches `max_drawdown` relative to that stale
+       peak and flattens again one day later -- a flapping on/off pattern
+       every time it tries to re-enter. Also caught by backtesting.
+
+    Using one single, self-consistent gauge (the raw signal's own
+    always-invested equity curve, decoupled from our own past halt
+    decisions) avoids both: it has no memory of whether we personally acted
+    on it, so there is no feedback loop between the halt decision and the
+    thing the halt decision is measured against. Reproduces backtest.py's
+    return/cost formula so it stays consistent with how the output would
+    actually score. The decision for day t uses only returns realized
+    through day t's close (from the weight decided at t-1) and is applied
+    to the weight decided AT day t, which only affects the t -> t+1 return
+    -- no leakage.
     """
     asset_returns = prices.pct_change()
     out = weights.copy()
     columns = weights.columns
     n = len(weights)
 
-    equity = 1.0
-    peak = 1.0
+    equity, peak = 1.0, 1.0
     halted = False
-    prev_applied = pd.Series(0.0, index=columns)   # weight applied to the return step
-    prev_prev_out = pd.Series(0.0, index=columns)  # out_weights two steps back, for turnover
+    prev_applied = pd.Series(0.0, index=columns)  # raw weights two steps back, for turnover
 
     for i in range(1, n):
-        applied_t = out.iloc[i - 1]  # decided at close of day i-1
-        ret_t = float((applied_t * asset_returns.iloc[i]).sum())
-        turnover_t = float((applied_t - prev_prev_out).abs().sum())
-        cost_t = turnover_t * (cost_bps / 10_000.0)
-        net_t = ret_t - cost_t
-
-        equity *= (1.0 + net_t)
+        applied = weights.iloc[i - 1]  # always the RAW weight -- decoupled from our own halt state
+        ret = float((applied * asset_returns.iloc[i]).sum())
+        turnover = float((applied - prev_applied).abs().sum())
+        equity *= (1.0 + ret - turnover * (cost_bps / 10_000.0))
         peak = max(peak, equity)
         dd = equity / peak - 1.0
 
-        if dd <= -max_drawdown:
-            halted = True
-        elif halted and dd >= -recovery_drawdown:
-            halted = False
-
         if halted:
-            out.iloc[i] = 0.0
+            if dd >= -recovery_drawdown:
+                halted = False
+        elif dd <= -max_drawdown:
+            halted = True
 
-        prev_prev_out = out.iloc[i - 1]
+        out.iloc[i] = 0.0 if halted else weights.iloc[i]
+        prev_applied = applied
 
     return out
 

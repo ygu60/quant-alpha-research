@@ -68,7 +68,36 @@ def test_drawdown_kill_switch_flattens_and_recovers():
 
     result = run_backtest(prices, out, cost_bps=0.0, long_only=False)
     assert result["stats"]["max_drawdown"] <= -0.14, "sanity: the triggering drop should still show up"
+
+    # The point of this test: it MUST re-enter once the underlying signal
+    # recovers, rather than staying flat forever. A flat (0%-return) book
+    # can never climb back toward its own peak, so judging recovery off the
+    # halted book's own equity curve is a permanent-lock bug -- this caught
+    # exactly that on the real backtest (see risk.py docstring).
+    assert out["A"].iloc[-1] != 0.0, "must re-enter after the underlying signal recovers, not stay flat forever"
     print("PASS: test_drawdown_kill_switch_flattens_and_recovers")
+
+
+def test_drawdown_kill_switch_recovers_using_shadow_not_actual_equity():
+    """Regression test for the permanent-lock bug: a naive implementation
+    that judges recovery from the ACTUAL (halted, therefore permanently
+    flat) equity curve can never re-enter, since a 0%-return book's
+    drawdown never shrinks. This constructs a long post-crash rally and
+    asserts the strategy comes back on.
+    """
+    dates = pd.bdate_range("2024-01-01", periods=60)
+    prices = pd.Series(100.0, index=dates)
+    prices.iloc[3] = 80.0  # -20% single-day breach
+    # steady recovery afterward
+    for i in range(4, 60):
+        prices.iloc[i] = prices.iloc[i - 1] * 1.01
+    prices = pd.DataFrame({"A": prices})
+    weights = pd.DataFrame({"A": 1.0}, index=dates)
+
+    out = drawdown_kill_switch(prices, weights, cost_bps=0.0, max_drawdown=0.15, recovery_drawdown=0.05)
+    assert not (out["A"] == 0.0).all(), "strategy must not be permanently flat after one breach"
+    assert out["A"].iloc[-1] == 1.0, "should be fully back on by the end of a sustained rally"
+    print("PASS: test_drawdown_kill_switch_recovers_using_shadow_not_actual_equity")
 
 
 if __name__ == "__main__":
@@ -76,4 +105,5 @@ if __name__ == "__main__":
     test_cap_gross_exposure_only_scales_down()
     test_volatility_target_scales_down_high_vol_book()
     test_drawdown_kill_switch_flattens_and_recovers()
+    test_drawdown_kill_switch_recovers_using_shadow_not_actual_equity()
     print("\nAll risk overlay sanity checks passed.")

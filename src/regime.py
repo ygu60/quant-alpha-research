@@ -80,7 +80,7 @@ def combined_rule_regime(prices: pd.Series, trend_window: int = 200, vol_window:
     """Cross of trend (up/down) x volatility (low/mid/high) into a single
     categorical label, e.g. "up_high" = uptrend during a high-vol spell.
     """
-    returns = prices.pct_change()
+    returns = prices.pct_change(fill_method=None)
     trend = trend_regime(prices, trend_window).map({True: "up", False: "down"})
     vol = volatility_regime(returns, vol_window, percentile_window)
     combined = trend.astype(str) + "_" + vol.astype(str)

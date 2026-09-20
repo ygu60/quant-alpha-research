@@ -54,11 +54,11 @@ def compute_features(prices: pd.DataFrame, volume: pd.DataFrame | None = None) -
     matching the "weights" convention used throughout this codebase so the
     same rolling/shift/rank idioms apply.
     """
-    daily_ret = prices.pct_change()
+    daily_ret = prices.pct_change(fill_method=None)
     feats: dict[str, pd.DataFrame] = {}
 
     for h in (1, 5, 10, 20):
-        feats[f"ret_{h}"] = prices.pct_change(h)
+        feats[f"ret_{h}"] = prices.pct_change(h, fill_method=None)
 
     for w in (10, 20):
         feats[f"vol_{w}"] = daily_ret.rolling(w).std(ddof=1)

@@ -34,7 +34,7 @@ def short_term_reversal(prices: pd.DataFrame, lookback: int = 3, n_long: int = 2
     losers, short the biggest winners (in a cash account, "short" just means
     "underweight / avoid" -- see backtest.py long_only flag).
     """
-    rets = prices.pct_change(lookback)
+    rets = prices.pct_change(lookback, fill_method=None)
     ranks = rets.rank(axis=1, method="first")
     n_assets = prices.shape[1]
 

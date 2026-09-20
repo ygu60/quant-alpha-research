@@ -17,6 +17,15 @@ over 23 real names, 2016–2026, net of transaction costs. Pairs trading and
 turn-of-month were also tested and are NOT recommended as currently
 specified — no credible out-of-sample edge.
 
+A follow-up ML signal search (memo §10; Ridge/RandomForest/GradientBoosting
+on 15 non-semantic price/volume features, purged walk-forward, a
+permutation-test negative control) also found **no deployable edge** —
+risk-managed Sharpe went negative (-0.08, -41.3% drawdown) against SPY's
+0.85 Sharpe / -33.7% drawdown over the identical out-of-sample dates.
+Documented as a negative result, not discarded — see `plots/` for the
+equity-curve, drawdown, rolling-Sharpe, feature-importance, and
+permutation-test charts that make the comparison immediate.
+
 ## Quickstart
 
 ```bash
@@ -48,8 +57,15 @@ python dashboard.py                # live terminal view of the most recent pipel
   (train-only) parameter search.
 - `src/metrics.py` — Sharpe, Sortino, Probabilistic Sharpe Ratio, max
   drawdown, turnover, hit rate.
+- `src/features.py` — non-semantic price/volume feature engineering for the
+  ML signal search (causal by construction; see `tests/test_features.py`).
+- `src/ml.py` — purged walk-forward ML training/prediction/portfolio
+  construction, with a `shuffle_labels` negative control for leakage/noise
+  checks (Lopez de Prado-style purging; see `tests/test_ml.py`).
+- `src/plots.py` — matplotlib charts for the memo (equity curves, drawdown,
+  rolling Sharpe, feature importance, permutation test), written to `plots/`.
 - `src/events.py` / `dashboard.py` — structured run logging and a live
   terminal dashboard (read-only; never places trades).
 - `run_pipeline.py` — the end-to-end study described in the memo.
-- `tests/` — engine and risk-overlay correctness checks (not strategy
-  alpha claims).
+- `tests/` — engine, risk-overlay, data-hygiene, pair-selection, feature,
+  and ML-pipeline correctness checks (not strategy alpha claims).

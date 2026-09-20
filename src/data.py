@@ -249,26 +249,50 @@ def load_research_universe(
     return clean, bench_prices, report
 
 
+def load_research_volume(
+    tickers: list[str],
+    start: str,
+    end: str | None = None,
+    use_cache: bool = True,
+) -> pd.DataFrame:
+    """Fetch raw share volume for exactly the given tickers (typically the
+    already-cleaned columns from `load_research_universe`) over the same
+    date range, reusing the same per-ticker disk cache -- no extra network
+    calls if `load_research_universe` already ran with the same date range.
+    Not run through `align_universe` itself: it's meant to be reindexed
+    against an already-aligned price panel by the caller (src/features.py
+    needs price and volume on identical index/columns).
+    """
+    end = end or datetime.now().strftime("%Y-%m-%d")
+    volume, failed = fetch_universe(tickers, start, end, use_cache=use_cache, field="volume")
+    if failed:
+        print(f"  [data] WARNING: volume fetch failed for {failed} (price data for these should already be absent)")
+    return volume
+
+
 def fetch_universe(
     tickers: list[str],
     start: str,
     end: str,
     use_cache: bool = True,
     sleep_between_s: float = 0.3,
+    field: str = "adjclose",
 ) -> tuple[pd.DataFrame, list[str]]:
-    """Fetch adjusted-close prices for a list of tickers into one aligned
-    DataFrame. Tickers that fail to fetch (delisted, typo'd, rate-limited)
-    are dropped and returned separately rather than raising, so one bad
-    ticker doesn't kill a 30-name universe fetch -- but the caller MUST look
-    at (and report) the dropped list, since silently shrinking the universe
-    changes the study.
+    """Fetch one OHLCV `field` (default: split/dividend-adjusted close) for a
+    list of tickers into one aligned DataFrame. Tickers that fail to fetch
+    (delisted, typo'd, rate-limited) are dropped and returned separately
+    rather than raising, so one bad ticker doesn't kill a 30-name universe
+    fetch -- but the caller MUST look at (and report) the dropped list,
+    since silently shrinking the universe changes the study. Cheap to call
+    again with a different `field` (e.g. "volume") since the underlying
+    per-ticker fetch is disk-cached regardless of which field is read from it.
     """
     series = {}
     failed = []
     for i, tkr in enumerate(tickers):
         try:
             hist = fetch_yahoo_history(tkr, start, end, use_cache=use_cache)
-            series[tkr] = hist["adjclose"]
+            series[tkr] = hist[field]
         except DataFetchError as exc:
             failed.append(tkr)
             print(f"  [data] WARNING dropping {tkr}: {exc}")

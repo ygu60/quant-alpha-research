@@ -355,7 +355,124 @@ regression tests for both kill-switch failure modes.
   independent bets is lower than 37, which PSR's sample-size term does not
   fully capture since it assumes i.i.d. per-period returns.
 
-## 10. Robinhood MCP — status and what it means for this pipeline
+## 10. Machine-learning signal search (non-semantic features)
+
+Requested as a follow-up: explore whether a model can find exploitable
+structure that a hand-picked, literature-motivated signal (§2-§7) wouldn't
+be looking for, with an explicit bar set in advance — **only worth
+deploying if it significantly outperforms SPY buy-and-hold, or has
+extremely stable returns with minimal drawdown.** Both are checked below,
+against the real result, not a hoped-for one.
+
+### 10.1 Method
+
+`src/features.py` computes 15 "non-semantic" features per name per day —
+none chosen for an economic story, all generic price/volume statistics:
+momentum at 1/5/10/20-day horizons, realized vol at two windows, RSI(14), a
+10-vs-50-day moving-average gap, a 20-day Bollinger z-score, rolling
+skew and lag-1 autocorrelation, a 5-vs-20-day dollar-volume surge ratio,
+and same-day cross-sectional percentile ranks of three of those. Every
+feature is a trailing-window statistic (causal by construction; see
+`tests/test_features.py::test_features_are_causal`, which perturbs only
+FUTURE prices and asserts no feature value at or before that point moves).
+
+The training target is the forward h-day return, which is the one
+deliberately non-causal quantity here — a label, never fed back in as an
+input. Because it looks forward, a training sample from the last `h` days
+of a training window has a label reaching into the following test period:
+a leakage path a simple hand-built signal doesn't have. Following Lopez de
+Prado (2018, *Advances in Financial Machine Learning*, ch. 7), those rows
+are **purged** (dropped) before every fit — `src/ml.py`, regression-tested
+in `tests/test_ml.py::test_purge_prevents_training_label_leakage` by
+shocking only test-period prices and confirming a deterministic model fits
+byte-identical training labels regardless.
+
+Three models, same walk-forward scaffolding as the rest of this project
+(252-day train / 63-day test, no overlap): Ridge regression (linear
+baseline), Random Forest, and histogram-based Gradient Boosting. **All
+three run with fixed, conservative hyperparameters (shallow trees,
+substantial min-leaf sizes, meaningful L2/alpha regularization) chosen
+before looking at results, not grid-searched** — §7.1 already showed
+searching for "better" parameters made a much simpler strategy worse
+out-of-sample, and there was no reason to expect that lesson wouldn't
+apply at least as strongly to a higher-capacity model with more
+overfitting surface area. Predictions rank the universe daily; the top
+quintile is held long-only, equal-weighted, scored through the same
+`run_backtest` used everywhere else in this project.
+
+### 10.2 Results
+
+| Model | Horizon | Sharpe | PSR | Max drawdown |
+|---|---|---|---|---|
+| Ridge | 5d | 0.09 | 0.61 | -80.3% |
+| Random Forest | 5d | 0.16 | 0.69 | -83.9% |
+| Gradient Boosting | 5d | 0.06 | 0.58 | -75.1% |
+| Random Forest | 10d | 0.35 | 0.85 | -83.1% |
+
+The 10-day Random Forest result looks like the best candidate at first
+glance. Two checks say otherwise:
+
+**Permutation test.** `src/ml.py`'s `shuffle_labels=True` reruns the exact
+same pipeline with training labels randomly permuted within each window —
+a negative control: if a model shows a real edge on labels that have been
+scrambled, that's a leakage bug, not alpha. Ran 5 shuffled-label draws
+against the 10-day Random Forest result: mean Sharpe -0.03, std 0.27, and
+the REAL result (0.35) sits at only the **80th percentile** of that noise
+distribution (`plots/permutation_test.png`). A model with genuine
+predictive power should clear something like the 95th+ percentile of its
+own noise floor; 80th is "consistent with a somewhat lucky draw," not
+evidence of skill. (5 draws is a small permutation sample for compute-time
+reasons — treat this as a strong hint, not a precise p-value.)
+
+**Risk-managed comparison against the actual bar.** Applying the identical
+risk overlay from §7.1 (not re-tuned — same `target_vol=0.10`,
+`max_position=0.25`, wide circuit breaker) to the 10-day Random Forest
+signal:
+
+| | Sharpe | Max drawdown |
+|---|---|---|
+| ML strategy, risk-managed | **-0.08** | **-41.3%** |
+| SPY buy & hold, same OOS dates | **0.85** | **-33.7%** |
+
+This fails both halves of the bar set at the start of this section at
+once: it does not significantly outperform SPY (it has a *negative*
+Sharpe against SPY's 0.85), and it does not have low, stable drawdown
+either (-41.3%, worse than SPY's own -33.7% over the identical dates).
+`plots/equity_curves.png` and `plots/drawdown.png` make this visually
+immediate: the ML strategy's equity curve is flat-to-down for the entire
+out-of-sample period while every benchmark compounds upward.
+
+Feature importances (`plots/feature_importance.png`) put the most weight
+on `ma_gap_10_50` and `vol_20` — a moving-average crossover and realized
+volatility, both closer to "trend/volatility regime" than to any
+short-horizon reversal-style signal. Interesting as a description of what
+the model latched onto, but not meaningful given the permutation test
+result above — a feature-importance ranking from a model that doesn't beat
+its own noise floor is not evidence those features matter.
+
+### 10.3 Conclusion
+
+**No ML configuration tested here is recommended for deployment.** The
+non-semantic feature set searched did not turn up a signal that survives a
+permutation test or that improves on simply holding SPY, on either
+Sharpe or drawdown. This is a negative result worth keeping in the
+project rather than discarding: it rules out the specific 15-feature,
+3-model, 2-horizon search space tried here, and the purged walk-forward +
+permutation-test scaffolding in `src/ml.py` is reusable for testing any
+future ML signal on this project without repeating the design work.
+
+Plausible reasons this particular search came up empty, worth revisiting
+before trying again rather than just retrying with different models: a
+23-name universe is a small cross-section for a model to find robust
+relative-ranking structure in (compare to institutional cross-sectional ML
+studies that typically use hundreds to thousands of names); daily OHLCV is
+a low-information-density data source relative to what's actually used in
+production financial ML (order-book/microstructure data, alternative data,
+higher-frequency bars); and 9 years of history is a modest sample for a
+model with as much capacity as gradient boosting or a 150-tree forest to
+generalize from without capturing regime-specific noise.
+
+## 11. Robinhood MCP — status and what it means for this pipeline
 
 Robinhood's Trading MCP (`https://agent.robinhood.com/mcp/trading`) connects
 an AI agent to a dedicated, sandboxed **Agentic account** — separate from
@@ -365,10 +482,11 @@ supported today; prediction markets/futures are not yet. The agent gets
 read access to all Robinhood accounts but can only place trades in the
 Agentic account. Not yet connected in this session.
 
-**Recommended sequence from here**, given §7's results:
+**Recommended sequence from here**, given §7 and §10's results:
 
-1. Do not deploy pairs trading or turn-of-month as currently specified —
-   neither cleared even a modest statistical confidence bar (§7.2, §7.3).
+1. Do not deploy pairs trading, turn-of-month, or any of the ML
+   configurations as currently specified — none cleared even a modest
+   statistical confidence bar (§7.2, §7.3, §10.3).
 2. If proceeding with short-term reversal + risk overlay: connect the
    Robinhood MCP, open the Agentic account with a small, explicit budget
    sized to survive a repeat of the -25.5% OOS max drawdown without forcing
@@ -387,7 +505,7 @@ Agentic account. Not yet connected in this session.
    plausibly turn out to be noise in the next few quarters, and the
    pipeline should be watched for that rather than assumed durable.
 
-## 11. Open questions
+## 12. Open questions
 
 - Position sizing in dollar terms for the Agentic account budget once
   it exists — this pipeline reports weights and Sharpe, not dollar P&L,

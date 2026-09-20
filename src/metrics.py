@@ -44,6 +44,43 @@ def turnover(weights: pd.DataFrame) -> float:
     return float(delta.mean())
 
 
+def probabilistic_sharpe_ratio(
+    returns: pd.Series,
+    benchmark_sharpe: float = 0.0,
+    periods_per_year: int = TRADING_DAYS,
+) -> float:
+    """Probabilistic Sharpe Ratio (Bailey & Lopez de Prado, 2012,
+    "The Sharpe Ratio Efficient Frontier").
+
+    A raw Sharpe ratio from a finite, possibly skewed/fat-tailed return
+    series overstates confidence in the true (population) Sharpe. PSR asks:
+    given the OBSERVED Sharpe, sample size, skew, and kurtosis, what is the
+    probability the TRUE Sharpe exceeds `benchmark_sharpe` (default 0)?
+
+    PSR = Phi( (SR_hat - SR*) * sqrt(n-1) / sqrt(1 - skew*SR_hat + (kurt-1)/4 * SR_hat^2) )
+
+    where SR_hat is the per-period (not annualized) Sharpe, skew/kurt are the
+    sample skewness/(non-excess) kurtosis of returns, and Phi is the
+    standard normal CDF. Values well below ~0.95 mean "this Sharpe ratio
+    could easily be noise" even if the annualized number looks attractive --
+    exactly the failure mode a small-sample backtest is prone to and a
+    trustworthy writeup should report, not hide.
+    """
+    from scipy.stats import norm
+
+    n = len(returns)
+    if n < 3:
+        return float("nan")
+    sr_hat = sharpe_ratio(returns, periods_per_year=1)  # per-period, not annualized
+    sr_star = benchmark_sharpe / np.sqrt(periods_per_year)
+    skew = float(returns.skew())
+    kurt = float(returns.kurtosis()) + 3.0  # pandas kurtosis() is excess kurtosis; formula wants raw
+
+    denom = np.sqrt(max(1e-12, 1 - skew * sr_hat + ((kurt - 1) / 4) * sr_hat ** 2))
+    z = (sr_hat - sr_star) * np.sqrt(n - 1) / denom
+    return float(norm.cdf(z))
+
+
 def hit_rate(returns: pd.Series) -> float:
     nonzero = returns[returns != 0]
     if len(nonzero) == 0:
@@ -58,6 +95,7 @@ def summarize(returns: pd.Series, weights: pd.DataFrame | None = None) -> dict:
         "annualized_vol": float(returns.std(ddof=1) * np.sqrt(TRADING_DAYS)),
         "sharpe": sharpe_ratio(returns),
         "sortino": sortino_ratio(returns),
+        "psr": probabilistic_sharpe_ratio(returns),
         "max_drawdown": max_drawdown(equity),
         "hit_rate": hit_rate(returns),
     }

@@ -29,16 +29,21 @@ from __future__ import annotations
 
 import sys
 from functools import partial
+from pathlib import Path
 
+import numpy as np
 import pandas as pd
+from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor
+from sklearn.linear_model import Ridge
 
-from src import events
+from src import events, plots
 from src.backtest import run_backtest
-from src.data import load_research_universe, simulate_universe
+from src.data import load_research_universe, load_research_volume, simulate_universe
 from src.metrics import summarize
+from src.ml import run_ml_walk_forward
 from src.pairs import adaptive_pairs_weights
 from src.risk import apply_full_overlay
-from src.strategies import short_term_reversal, turn_of_month, zscore_pairs
+from src.strategies import short_term_reversal, turn_of_month
 from src.walk_forward import walk_forward, walk_forward_with_selection
 
 pd.set_option("display.float_format", lambda x: f"{x:,.4f}")
@@ -205,6 +210,102 @@ def main() -> None:
         print_stats("3. Walk-forward OOS, applied to SPY/IWM/IJR (broad-portfolio effect)", wf_tom.combined_stats)
         log_result("turn_of_month_walk_forward", wf_tom.combined_returns, wf_tom.combined_stats)
 
+        # ---------------- Strategy 4: ML non-semantic signal search ----------------
+        print("\n" + "=" * 70)
+        print("STRATEGY 4: Machine-learning signal search (non-semantic features)")
+        print("=" * 70)
+        volume = load_research_volume(list(prices.columns), start="2016-01-01")
+        volume = volume.reindex(index=prices.index, columns=prices.columns)
+
+        ml_models = {
+            "ridge": lambda: Ridge(alpha=10.0),
+            "random_forest": lambda: RandomForestRegressor(
+                n_estimators=150, max_depth=4, min_samples_leaf=50, random_state=42, n_jobs=-1),
+            "gradient_boosting": lambda: HistGradientBoostingRegressor(
+                max_depth=3, max_iter=150, learning_rate=0.05, min_samples_leaf=30,
+                l2_regularization=1.0, random_state=42),
+        }
+        ml_results = {}
+        for name, build in ml_models.items():
+            res = run_ml_walk_forward(prices, volume, build_model=build, horizon=5,
+                                       train_days=TRAIN_DAYS, test_days=TEST_DAYS, top_frac=0.20, cost_bps=COST_BPS)
+            ml_results[name] = res
+            print_stats(f"4a. {name}, horizon=5, RAW (no overlay)", res.combined_stats)
+
+        best_name = max(ml_results, key=lambda k: ml_results[k].combined_stats.get("sharpe", -99))
+        build_best = ml_models[best_name]
+        print(f"\nBest of three by raw OOS Sharpe: {best_name} (still evaluated skeptically below)")
+
+        ml_h10 = run_ml_walk_forward(prices, volume, build_model=build_best, horizon=10,
+                                      train_days=TRAIN_DAYS, test_days=TEST_DAYS, top_frac=0.20, cost_bps=COST_BPS)
+        print_stats(f"4b. {best_name}, horizon=10, RAW (robustness check on horizon choice)", ml_h10.combined_stats)
+
+        print("\n4c. Permutation test: is the horizon=10 result distinguishable from noise?")
+        null_sharpes = []
+        for seed in range(5):
+            shuf = run_ml_walk_forward(prices, volume, build_model=build_best, horizon=10,
+                                        train_days=TRAIN_DAYS, test_days=TEST_DAYS, top_frac=0.20,
+                                        cost_bps=COST_BPS, shuffle_labels=True, random_state=seed)
+            null_sharpes.append(shuf.combined_stats.get("sharpe", np.nan))
+        null_sharpes = np.array(null_sharpes)
+        real_sharpe = ml_h10.combined_stats["sharpe"]
+        percentile = float((null_sharpes < real_sharpe).mean())
+        print(f"    Real Sharpe {real_sharpe:.3f} vs. {len(null_sharpes)} shuffled-label draws: "
+              f"mean={null_sharpes.mean():.3f}, std={null_sharpes.std():.3f}, "
+              f"real sits at the {percentile:.0%} percentile of the noise distribution.")
+        print("    (A model with real predictive power should sit well above 95% of the noise")
+        print("     distribution; sitting around 80-90% is suggestive at best, not strong evidence.)")
+
+        def ml_overlay(window_prices, weights):
+            return apply_full_overlay(window_prices, weights, cost_bps=COST_BPS, **RISK_CFG)
+
+        ml_managed = run_ml_walk_forward(prices, volume, build_model=build_best, horizon=10,
+                                          train_days=TRAIN_DAYS, test_days=TEST_DAYS, top_frac=0.20,
+                                          cost_bps=COST_BPS, risk_overlay=ml_overlay)
+        print_stats("4d. Risk-managed (same protocol as Strategy 1, not re-tuned)", ml_managed.combined_stats)
+        log_result("ml_walk_forward_risk_managed", ml_managed.combined_returns, ml_managed.combined_stats)
+
+        spy_ret = bench["SPY"].pct_change().dropna()
+        common_spy = ml_managed.combined_returns.index.intersection(spy_ret.index)
+        spy_oos_stats = summarize(spy_ret.loc[common_spy])
+        print_stats("SPY buy & hold over the SAME out-of-sample dates", spy_oos_stats)
+
+        print(f"\n    ML strategy vs. SPY over identical OOS dates: "
+              f"Sharpe {ml_managed.combined_stats.get('sharpe', float('nan')):.3f} vs. {spy_oos_stats['sharpe']:.3f}, "
+              f"max drawdown {ml_managed.combined_stats.get('max_drawdown', float('nan')):.1%} vs. {spy_oos_stats['max_drawdown']:.1%}.")
+        clears_bar = (ml_managed.combined_stats.get("sharpe", -99) > spy_oos_stats["sharpe"] * 1.25) or \
+                     (ml_managed.combined_stats.get("max_drawdown", -1) > -0.10 and ml_managed.combined_stats.get("sharpe", -99) > 0.3)
+        print(f"    Clears the 'significantly beats SPY, or very stable low-drawdown' bar? "
+              f"{'YES' if clears_bar else 'NO -- not recommended for deployment.'}")
+
+        # ---------------- Plots ----------------
+        print("\nGenerating plots...")
+        plots.PLOTS_DIR.mkdir(exist_ok=True)
+        universe_bh_ret = bh_res["returns"]
+        series_for_charts = {
+            "Reversal + risk overlay": wf_managed.combined_returns,
+            "ML strategy (risk-managed)": ml_managed.combined_returns,
+            "SPY buy & hold": spy_ret,
+            "Universe buy & hold": universe_bh_ret,
+        }
+        plots.plot_equity_curves(series_for_charts, "Out-of-sample equity curves (walk-forward, net of costs)",
+                                  plots.PLOTS_DIR / "equity_curves.png")
+        plots.plot_drawdown(series_for_charts, "Out-of-sample drawdown", plots.PLOTS_DIR / "drawdown.png")
+        plots.plot_rolling_sharpe(series_for_charts, 126, "Rolling 6-month annualized Sharpe (out-of-sample)",
+                                   plots.PLOTS_DIR / "rolling_sharpe.png")
+        plots.plot_window_sharpe_bars(wf_managed.window_stats, "Reversal + risk overlay: Sharpe per walk-forward window",
+                                       plots.PLOTS_DIR / "reversal_window_sharpe.png")
+        plots.plot_window_sharpe_bars(ml_managed.window_stats, "ML strategy: Sharpe per walk-forward window",
+                                       plots.PLOTS_DIR / "ml_window_sharpe.png")
+        if not ml_h10.feature_importances.empty:
+            plots.plot_feature_importance(ml_h10.feature_importances.mean(),
+                                           f"{best_name} (horizon=10): mean feature importance",
+                                           plots.PLOTS_DIR / "feature_importance.png")
+        plots.plot_permutation_test(null_sharpes, real_sharpe,
+                                     f"{best_name} (horizon=10): real Sharpe vs. shuffled-label noise floor",
+                                     plots.PLOTS_DIR / "permutation_test.png")
+        print(f"Plots written to {plots.PLOTS_DIR}/")
+
         # ---------------- Final recommendation ----------------
         print("\n" + "=" * 70)
         print("RECOMMENDATION")
@@ -216,10 +317,10 @@ def main() -> None:
         print(f"  Probabilistic Sharpe Ratio: {headline['psr']:.3f}  (confidence true Sharpe > 0)")
         print(f"  OOS max drawdown:           {headline['max_drawdown']:.1%}")
         print(f"  OOS annualized return:      {headline['annualized_return']:.1%}")
-        print(f"Pairs trading and turn-of-month showed no credible OOS edge on this universe/")
-        print(f"period and should NOT be traded as currently specified. See RESEARCH_MEMO.md")
-        print(f"for the full reasoning, including two risk-overlay bugs found and fixed during")
-        print(f"this research and why they mattered.")
+        print(f"Pairs trading, turn-of-month, and the ML signal search showed no credible OOS")
+        print(f"edge on this universe/period and should NOT be traded as currently specified.")
+        print(f"See RESEARCH_MEMO.md for the full reasoning, including two risk-overlay bugs")
+        print(f"found and fixed during this research and why they mattered.")
         events.log(
             "status", "pipeline recommendation",
             recommended_strategy="short_term_reversal_risk_managed",

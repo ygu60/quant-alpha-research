@@ -67,13 +67,19 @@ def run_ml_walk_forward(
     min_train_rows: int = 200,
     shuffle_labels: bool = False,
     random_state: int = 0,
+    risk_overlay=None,
 ) -> MLWalkForwardResult:
     """`build_model()` must return a FRESH, unfit scikit-learn-style
     regressor (called once per window). `shuffle_labels=True` runs the
     exact same pipeline with training labels randomly permuted within each
     window -- a negative control: if this ever produces a real out-of-
     sample edge, that's evidence of a leakage bug somewhere in this module,
-    not of a strategy (see tests/test_ml.py).
+    not of a strategy (see tests/test_ml.py). `risk_overlay`, if given, is
+    called as `risk_overlay(window_prices, full_weights) -> weights` right
+    before scoring (e.g. `src.risk.apply_full_overlay` partially applied) --
+    same non-negative, already-long-only weights convention as the rest of
+    this project, so the result must be scored with the same long_only=False
+    used here.
     """
     feature_frames = compute_features(prices, volume)
     labels = forward_return(prices, horizon)
@@ -132,6 +138,8 @@ def run_ml_walk_forward(
         full_weights = pd.DataFrame(0.0, index=window_dates, columns=prices.columns)
         full_weights.loc[test_dates] = window_weights
         window_prices = prices.loc[window_dates]
+        if risk_overlay is not None:
+            full_weights = risk_overlay(window_prices, full_weights)
         result = run_backtest(window_prices, full_weights, cost_bps=cost_bps, long_only=False)
         test_returns = result["returns"][result["returns"].index >= test_dates[0]]
 
